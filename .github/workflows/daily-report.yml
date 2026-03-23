@@ -16,67 +16,63 @@ jobs:
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
 
-      - name: Comprehensive server audit via SSH
-        uses: appleboy/ssh-action@v1
-        id: audit
-        with:
-          host: ${{ secrets.MAC_MINI_HOST }}
-          username: ${{ secrets.MAC_MINI_USER }}
-          key: ${{ secrets.DEPLOY_KEY }}
-          script: |
-            export PATH=/opt/orbstack/bin:/usr/local/bin:/opt/homebrew/bin:$PATH
+      - name: Setup SSH key
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H ${{ secrets.MAC_MINI_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
 
-            echo "HOSTNAME=$(hostname)"
-            echo "UPTIME=$(uptime | sed 's/.*up /up /' | cut -d',' -f1-2)"
-
-            # Disk
-            DISK_LINE=$(df -h /System/Volumes/Data 2>/dev/null | tail -1)
-            echo "DISK_USED=$(echo "$DISK_LINE" | awk '{print $3}')"
-            echo "DISK_TOTAL=$(echo "$DISK_LINE" | awk '{print $2}')"
-            echo "DISK_PCT=$(echo "$DISK_LINE" | awk '{print $5}')"
-            echo "DISK_FREE=$(echo "$DISK_LINE" | awk '{print $4}')"
-
-            # Docker overview
-            echo "DOCKER_RUNNING=$(docker ps -q 2>/dev/null | wc -l | xargs)"
-            echo "DOCKER_IMAGES=$(docker images -q 2>/dev/null | wc -l | xargs)"
-            echo "DOCKER_STOPPED=$(docker ps -a --filter 'status=exited' --format '{{.Names}}' 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
-            echo "DANGLING_IMAGES=$(docker images -f 'dangling=true' -q 2>/dev/null | wc -l | xargs)"
-
-            # Docker disk
-            echo "DOCKER_DISK_START"
-            docker system df 2>/dev/null
-            echo "DOCKER_DISK_END"
-
-            # Top directories
-            echo "TOP_DIRS_START"
-            du -sh ~/coral_moneymanager ~/smithbuilder ~/projectmanager ~/openrouterlogviewer ~/project-coach ~/Documents ~/Library ~/Downloads 2>/dev/null | sort -rh | head -8
-            echo "TOP_DIRS_END"
-
-            # All services
-            echo "SERVICES_START"
-            for pn in "3000:LogViewer" "3001:MissionCtrl" "3002:ProjMgr" "3003:Homebase" "3004:Coach" "3005:Coral" "3010:SmithBuilder" "8000:MCBackend" "9001:Penpot"; do
-              p="${pn%%:*}"; n="${pn##*:}"
-              c=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://localhost:$p" 2>/dev/null || echo "000")
-              echo "${n}|${p}|${c}"
-            done
-            echo "SERVICES_END"
-
-            # Ollama
-            OLLAMA_OK=$(curl -s --max-time 3 http://127.0.0.1:11434/api/tags 2>/dev/null | head -c 1)
-            if [ "$OLLAMA_OK" = "{" ]; then
-              MODELS=$(curl -s --max-time 3 http://127.0.0.1:11434/api/tags 2>/dev/null | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('models',[])))" 2>/dev/null || echo "?")
-              echo "OLLAMA=Running (${MODELS} models)"
-            else
-              echo "OLLAMA=Not responding"
-            fi
-
-      - name: Send daily report to Discord
+      - name: Audit and send report
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_MONITORING }}
-          RAW: ${{ steps.audit.outputs.stdout }}
+          MAC_HOST: ${{ secrets.MAC_MINI_HOST }}
+          MAC_USER: ${{ secrets.MAC_MINI_USER }}
         shell: bash
         run: |
           export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
+
+          RAW=$(ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_ed25519 "${MAC_USER}@${MAC_HOST}" 'bash -s' <<'REMOTESCRIPT'
+          export PATH=/opt/orbstack/bin:/usr/local/bin:/opt/homebrew/bin:$PATH
+
+          echo "HOSTNAME=$(hostname)"
+          echo "UPTIME=$(uptime | sed "s/.*up /up /" | cut -d"," -f1-2)"
+
+          DISK_LINE=$(df -h /System/Volumes/Data 2>/dev/null | tail -1)
+          echo "DISK_USED=$(echo "$DISK_LINE" | awk '{print $3}')"
+          echo "DISK_TOTAL=$(echo "$DISK_LINE" | awk '{print $2}')"
+          echo "DISK_PCT=$(echo "$DISK_LINE" | awk '{print $5}')"
+          echo "DISK_FREE=$(echo "$DISK_LINE" | awk '{print $4}')"
+
+          echo "DOCKER_RUNNING=$(docker ps -q 2>/dev/null | wc -l | xargs)"
+          echo "DOCKER_IMAGES=$(docker images -q 2>/dev/null | wc -l | xargs)"
+          echo "DANGLING_IMAGES=$(docker images -f 'dangling=true' -q 2>/dev/null | wc -l | xargs)"
+          echo "DOCKER_STOPPED=$(docker ps -a --filter 'status=exited' --format '{{.Names}}' 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
+
+          OLLAMA_OK=$(curl -s --max-time 3 http://127.0.0.1:11434/api/tags 2>/dev/null | head -c 1)
+          if [ "$OLLAMA_OK" = "{" ]; then
+            MODELS=$(curl -s --max-time 3 http://127.0.0.1:11434/api/tags 2>/dev/null | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('models',[])))" 2>/dev/null || echo "?")
+            echo "OLLAMA=Running (${MODELS} models)"
+          else
+            echo "OLLAMA=Not responding"
+          fi
+
+          echo "SERVICES_START"
+          for pn in "3000:LogViewer" "3001:MissionCtrl" "3002:ProjMgr" "3003:Homebase" "3004:Coach" "3005:Coral" "3010:SmithBuilder" "8000:MCBackend" "9001:Penpot"; do
+            p="${pn%%:*}"; n="${pn##*:}"
+            c=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://localhost:$p" 2>/dev/null || echo "000")
+            echo "${n}|${p}|${c}"
+          done
+          echo "SERVICES_END"
+          REMOTESCRIPT
+          )
+
+          echo "--- RAW OUTPUT ---"
+          echo "$RAW"
+          echo "--- END RAW ---"
+
           TODAY="$(date -u +'%Y-%m-%d')"
           NOW_ISO="$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')"
 
@@ -88,8 +84,8 @@ jobs:
           DISK_TOTAL="$(echo "$RAW" | grep '^DISK_TOTAL=' | cut -d= -f2-)"
           DOCKER_RUNNING="$(echo "$RAW" | grep '^DOCKER_RUNNING=' | cut -d= -f2-)"
           DOCKER_IMAGES="$(echo "$RAW" | grep '^DOCKER_IMAGES=' | cut -d= -f2-)"
-          DOCKER_STOPPED="$(echo "$RAW" | grep '^DOCKER_STOPPED=' | cut -d= -f2-)"
           DANGLING="$(echo "$RAW" | grep '^DANGLING_IMAGES=' | cut -d= -f2-)"
+          DOCKER_STOPPED="$(echo "$RAW" | grep '^DOCKER_STOPPED=' | cut -d= -f2-)"
           OLLAMA="$(echo "$RAW" | grep '^OLLAMA=' | cut -d= -f2-)"
 
           # Service status
@@ -105,21 +101,16 @@ jobs:
             fi
           done <<< "$(echo "$RAW" | sed -n '/SERVICES_START/,/SERVICES_END/p' | grep '|')"
 
-          # Top dirs
-          TOP_DIRS="$(echo "$RAW" | sed -n '/TOP_DIRS_START/,/TOP_DIRS_END/p' | grep -v '_START\|_END' | head -8 | tr '\n' ',' | sed 's/,$//')"
-
           # Color
           COLOR=3066993
-          if [ -n "$DISK_PCT" ] && [ "$DISK_PCT" -gt 90 ] 2>/dev/null; then
-            COLOR=15158332
-          elif [ -n "$DISK_PCT" ] && [ "$DISK_PCT" -gt 80 ] 2>/dev/null; then
-            COLOR=15844367
-          fi
+          if [ -n "$DISK_PCT" ] && [ "$DISK_PCT" -gt 90 ] 2>/dev/null; then COLOR=15158332
+          elif [ -n "$DISK_PCT" ] && [ "$DISK_PCT" -gt 80 ] 2>/dev/null; then COLOR=15844367; fi
 
           DISK_STR="${DISK_USED}/${DISK_TOTAL} (${DISK_PCT}%) - ${DISK_FREE} free"
-          CLEANUP_STR="Dangling images: ${DANGLING}, Stopped containers: ${DOCKER_STOPPED:-none}"
+          CLEANUP_STR="Dangling images: ${DANGLING:-0}, Stopped: ${DOCKER_STOPPED:-none}"
+          SLIST_ESC="$(echo -e "$SLIST" | head -c 500)"
 
-          PAYLOAD="{\"username\":\"Mac Mini Monitor\",\"embeds\":[{\"title\":\":clipboard: Daily Report - ${TODAY}\",\"color\":${COLOR},\"fields\":[{\"name\":\"Host\",\"value\":\"${HOSTNAME}\",\"inline\":true},{\"name\":\"Uptime\",\"value\":\"${UPTIME_INFO}\",\"inline\":true},{\"name\":\"Disk\",\"value\":\"${DISK_STR}\",\"inline\":false},{\"name\":\"Docker\",\"value\":\"${DOCKER_RUNNING} running, ${DOCKER_IMAGES} images\",\"inline\":true},{\"name\":\"Ollama\",\"value\":\"${OLLAMA}\",\"inline\":true},{\"name\":\"Services\",\"value\":\"$(echo -e "$SLIST" | head -c 500)\",\"inline\":false},{\"name\":\"Cleanup\",\"value\":\"${CLEANUP_STR}\",\"inline\":false}],\"timestamp\":\"${NOW_ISO}\"}]}"
+          PAYLOAD="{\"username\":\"Mac Mini Monitor\",\"embeds\":[{\"title\":\":clipboard: Daily Report - ${TODAY}\",\"color\":${COLOR},\"fields\":[{\"name\":\"Host\",\"value\":\"${HOSTNAME}\",\"inline\":true},{\"name\":\"Uptime\",\"value\":\"${UPTIME_INFO}\",\"inline\":true},{\"name\":\"Disk\",\"value\":\"${DISK_STR}\",\"inline\":false},{\"name\":\"Docker\",\"value\":\"${DOCKER_RUNNING} running, ${DOCKER_IMAGES} images\",\"inline\":true},{\"name\":\"Ollama\",\"value\":\"${OLLAMA}\",\"inline\":true},{\"name\":\"Services\",\"value\":\"${SLIST_ESC}\",\"inline\":false},{\"name\":\"Cleanup\",\"value\":\"${CLEANUP_STR}\",\"inline\":false}],\"timestamp\":\"${NOW_ISO}\"}]}"
 
           curl -s -H "Content-Type: application/json" -d "$PAYLOAD" "$DISCORD_WEBHOOK"
           echo ""

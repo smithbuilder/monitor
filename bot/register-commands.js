@@ -11,23 +11,23 @@ const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 
 const commands = [
   new SlashCommandBuilder()
-    .setName('status')
+    .setName('mm-status')
     .setDescription('Full server status overview'),
 
   new SlashCommandBuilder()
-    .setName('disk')
+    .setName('mm-disk')
     .setDescription('Disk usage breakdown'),
 
   new SlashCommandBuilder()
-    .setName('docker')
+    .setName('mm-docker')
     .setDescription('Docker container status'),
 
   new SlashCommandBuilder()
-    .setName('services')
+    .setName('mm-services')
     .setDescription('HTTP health check all services'),
 
   new SlashCommandBuilder()
-    .setName('logs')
+    .setName('mm-logs')
     .setDescription('View recent logs for a service')
     .addStringOption(option =>
       option
@@ -49,7 +49,7 @@ const commands = [
     ),
 
   new SlashCommandBuilder()
-    .setName('cleanup')
+    .setName('mm-cleanup')
     .setDescription('Run Docker cleanup (prune images, containers, build cache)'),
 ].map(cmd => cmd.toJSON());
 
@@ -58,10 +58,20 @@ const rest = new REST().setToken(process.env.DISCORD_BOT_TOKEN);
 (async () => {
   try {
     console.log(`Registering ${commands.length} slash commands...`);
-    await rest.put(
-      Routes.applicationCommands(process.env.DISCORD_CLIENT_ID),
-      { body: commands },
-    );
+    const guildId = process.env.DISCORD_GUILD_ID;
+    if (guildId) {
+      await rest.put(
+        Routes.applicationGuildCommands(process.env.DISCORD_CLIENT_ID, guildId),
+        { body: commands },
+      );
+      console.log(`Registered as guild commands for server ${guildId} (instant).`);
+    } else {
+      await rest.put(
+        Routes.applicationCommands(process.env.DISCORD_CLIENT_ID),
+        { body: commands },
+      );
+      console.log('Registered as global commands (may take up to 1 hour).');
+    }
     console.log('Commands registered successfully.');
   } catch (error) {
     console.error('Failed to register commands:', error);

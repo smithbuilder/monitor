@@ -280,12 +280,12 @@ client.on('interactionCreate', async interaction => {
 
   try {
     switch (interaction.commandName) {
-      case 'status': await handleStatus(interaction); break;
-      case 'disk': await handleDisk(interaction); break;
-      case 'docker': await handleDocker(interaction); break;
-      case 'services': await handleServices(interaction); break;
-      case 'logs': await handleLogs(interaction); break;
-      case 'cleanup': await handleCleanup(interaction); break;
+      case 'mm-status': await handleStatus(interaction); break;
+      case 'mm-disk': await handleDisk(interaction); break;
+      case 'mm-docker': await handleDocker(interaction); break;
+      case 'mm-services': await handleServices(interaction); break;
+      case 'mm-logs': await handleLogs(interaction); break;
+      case 'mm-cleanup': await handleCleanup(interaction); break;
       default:
         await interaction.reply({ content: 'Unknown command.', ephemeral: true });
     }

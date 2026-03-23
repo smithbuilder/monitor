@@ -86,6 +86,7 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_MONITORING }}
           RAW_OUTPUT: ${{ steps.audit.outputs.stdout }}
         run: |
+          export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
           TIMESTAMP=$(date -u +"%Y-%m-%d")
 
           # Extract disk info

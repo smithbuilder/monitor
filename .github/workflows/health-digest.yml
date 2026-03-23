@@ -78,6 +78,7 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_MONITORING }}
           RAW_OUTPUT: ${{ steps.metrics.outputs.stdout }}
         run: |
+          export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
           TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
 
           # Extract sections

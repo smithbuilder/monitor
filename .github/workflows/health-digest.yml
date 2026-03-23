@@ -1,0 +1,152 @@
+name: Server Health Digest
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # Every 6 hours
+  workflow_dispatch:
+
+jobs:
+  health-digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+
+      - name: Collect server metrics via SSH
+        uses: appleboy/ssh-action@v1
+        id: metrics
+        with:
+          host: ${{ secrets.MAC_MINI_HOST }}
+          username: ${{ secrets.MAC_MINI_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          script: |
+            export PATH=/opt/orbstack/bin:/usr/local/bin:/opt/homebrew/bin:$PATH
+
+            echo "===HOSTNAME==="
+            hostname
+
+            echo "===UPTIME==="
+            uptime
+
+            echo "===DISK==="
+            df -h /System/Volumes/Data 2>/dev/null || df -h /
+
+            echo "===MEMORY==="
+            # macOS uses vm_stat instead of free
+            vm_stat 2>/dev/null | head -10 || free -m 2>/dev/null | grep Mem
+
+            echo "===DOCKER_SYSTEM==="
+            docker system df 2>/dev/null || echo "Docker not available"
+
+            echo "===DOCKER_PS==="
+            docker ps --format "{{.Names}}|{{.Status}}|{{.Ports}}" 2>/dev/null || echo "Docker not available"
+
+            echo "===DOCKER_STOPPED==="
+            docker ps -a --filter "status=exited" --format "{{.Names}}|{{.Status}}" 2>/dev/null || echo "none"
+
+            echo "===SERVICES==="
+            # Check bare Node.js apps
+            for port_name in "3000:LogViewer" "3003:Homebase" "3004:Coach"; do
+              port="${port_name%%:*}"
+              name="${port_name##*:}"
+              code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://localhost:$port" 2>/dev/null || echo "000")
+              echo "${name}|${port}|${code}"
+            done
+
+            echo "===OLLAMA==="
+            curl -s --max-time 5 http://127.0.0.1:11434/api/tags 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'{len(d.get(\"models\",[]))} models loaded')" 2>/dev/null || echo "Ollama not responding"
+
+            echo "===LAUNCHD==="
+            launchctl list 2>/dev/null | grep -E "openclaw|ollama|openrouter|homebase" || echo "No launchd services found"
+
+            echo "===DOCKER_LOGS_SIZE==="
+            # Check if any container logs are large
+            for container in $(docker ps --format "{{.Names}}" 2>/dev/null); do
+              log_file=$(docker inspect --format='{{.LogPath}}' "$container" 2>/dev/null)
+              if [ -n "$log_file" ] && [ -f "$log_file" ]; then
+                size=$(du -sh "$log_file" 2>/dev/null | awk '{print $1}')
+                echo "${container}|${size}"
+              fi
+            done
+
+      - name: Parse metrics and send Discord digest
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_MONITORING }}
+          RAW_OUTPUT: ${{ steps.metrics.outputs.stdout }}
+        run: |
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
+
+          # Extract sections
+          HOSTNAME=$(echo "$RAW_OUTPUT" | sed -n '/===HOSTNAME===/,/===UPTIME===/p' | grep -v '===' | head -1)
+          UPTIME_INFO=$(echo "$RAW_OUTPUT" | sed -n '/===UPTIME===/,/===DISK===/p' | grep -v '===' | head -1)
+          DISK_INFO=$(echo "$RAW_OUTPUT" | sed -n '/===DISK===/,/===MEMORY===/p' | grep -v '===' | tail -1)
+          DOCKER_SYS=$(echo "$RAW_OUTPUT" | sed -n '/===DOCKER_SYSTEM===/,/===DOCKER_PS===/p' | grep -v '===' | head -5)
+          DOCKER_PS=$(echo "$RAW_OUTPUT" | sed -n '/===DOCKER_PS===/,/===DOCKER_STOPPED===/p' | grep -v '===')
+          STOPPED=$(echo "$RAW_OUTPUT" | sed -n '/===DOCKER_STOPPED===/,/===SERVICES===/p' | grep -v '===' | grep -v '^none$')
+          OLLAMA=$(echo "$RAW_OUTPUT" | sed -n '/===OLLAMA===/,/===LAUNCHD===/p' | grep -v '===' | head -1)
+          LOG_SIZES=$(echo "$RAW_OUTPUT" | sed -n '/===DOCKER_LOGS_SIZE===/,//p' | grep -v '===')
+
+          # Determine overall health color
+          COLOR=3066993  # Green (default)
+          TITLE="Server Health: OK"
+
+          # Check disk usage percentage
+          DISK_PCT=$(echo "$DISK_INFO" | awk '{print $5}' | tr -d '%' 2>/dev/null)
+          if [ -n "$DISK_PCT" ] && [ "$DISK_PCT" -gt 90 ] 2>/dev/null; then
+            COLOR=15158332  # Red
+            TITLE="Server Health: CRITICAL"
+          elif [ -n "$DISK_PCT" ] && [ "$DISK_PCT" -gt 80 ] 2>/dev/null; then
+            COLOR=15844367  # Yellow
+            TITLE="Server Health: WARNING"
+          fi
+
+          # Check for stopped containers
+          if [ -n "$STOPPED" ]; then
+            COLOR=15844367  # Yellow (at minimum)
+            TITLE="Server Health: WARNING"
+          fi
+
+          # Format Docker container list
+          CONTAINER_LIST=""
+          while IFS='|' read -r name status ports; do
+            [ -z "$name" ] && continue
+            if echo "$status" | grep -qi "up"; then
+              CONTAINER_LIST="${CONTAINER_LIST}:green_circle: ${name}: ${status}\\n"
+            else
+              CONTAINER_LIST="${CONTAINER_LIST}:red_circle: ${name}: ${status}\\n"
+            fi
+          done <<< "$DOCKER_PS"
+
+          # Format log sizes (warn if any > 100M)
+          LOG_WARNINGS=""
+          while IFS='|' read -r container size; do
+            [ -z "$container" ] && continue
+            LOG_WARNINGS="${LOG_WARNINGS}${container}: ${size}\\n"
+          done <<< "$LOG_SIZES"
+
+          PAYLOAD=$(cat <<ENDJSON
+          {
+            "username": "Mac Mini Monitor",
+            "embeds": [{
+              "title": "${TITLE}",
+              "color": ${COLOR},
+              "fields": [
+                {"name": ":computer: Host", "value": "${HOSTNAME:-unknown}", "inline": true},
+                {"name": ":clock1: Uptime", "value": "$(echo "$UPTIME_INFO" | sed 's/.*up/up/' | cut -d',' -f1-2)", "inline": true},
+                {"name": ":floppy_disk: Disk", "value": "${DISK_INFO:-unknown}", "inline": false},
+                {"name": ":whale: Containers", "value": "$(echo -e "${CONTAINER_LIST:-No containers}")", "inline": false},
+                {"name": ":llama: Ollama", "value": "${OLLAMA:-unknown}", "inline": true},
+                {"name": ":page_facing_up: Log Sizes", "value": "$(echo -e "${LOG_WARNINGS:-No large logs}")", "inline": false}
+              ],
+              "footer": {"text": "Health digest at ${TIMESTAMP}"},
+              "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+            }]
+          }
+          ENDJSON
+          )
+
+          curl -s -H "Content-Type: application/json" -d "$PAYLOAD" "$DISCORD_WEBHOOK"

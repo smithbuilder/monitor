@@ -1,0 +1,101 @@
+name: Uptime Monitor
+
+on:
+  schedule:
+    - cron: '*/15 * * * *' # Every 15 minutes
+  workflow_dispatch: # Manual trigger
+
+jobs:
+  check-uptime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+
+      - name: Check all service endpoints
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_MONITORING }}
+          MAC_MINI_IP: ${{ secrets.MAC_MINI_HOST }}
+        run: |
+          FAILURES=""
+          REPORT=""
+          ALL_OK=true
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
+
+          # Service definitions: "name|port|path|expected_code"
+          SERVICES=(
+            "OpenRouter Log Viewer|3000|/|200,307"
+            "Mission Control|3001|/|200"
+            "Project Manager|3002|/api/health|200"
+            "Homebase|3003|/api/health|200"
+            "Project Coach|3004|/|200"
+            "Coral Money Manager|3005|/api/health|200"
+            "SmithBuilder|3010|/|200"
+            "MC Backend|8000|/docs|200"
+            "Penpot|9001|/|200,302"
+          )
+
+          for SERVICE in "${SERVICES[@]}"; do
+            IFS='|' read -r NAME PORT PATH EXPECTED <<< "$SERVICE"
+            URL="http://${MAC_MINI_IP}:${PORT}${PATH}"
+
+            HTTP_CODE=$(curl -o /dev/null -s -w "%{http_code}" --max-time 10 "$URL" 2>/dev/null || echo "000")
+            RESPONSE_TIME=$(curl -o /dev/null -s -w "%{time_total}" --max-time 10 "$URL" 2>/dev/null || echo "timeout")
+
+            # Check if HTTP_CODE is in the expected codes
+            IS_OK=false
+            IFS=',' read -ra CODES <<< "$EXPECTED"
+            for CODE in "${CODES[@]}"; do
+              if [ "$HTTP_CODE" = "$CODE" ]; then
+                IS_OK=true
+                break
+              fi
+            done
+
+            if [ "$IS_OK" = true ]; then
+              REPORT="${REPORT}\\n:white_check_mark: **${NAME}** (:${PORT}): HTTP ${HTTP_CODE} (${RESPONSE_TIME}s)"
+            else
+              ALL_OK=false
+              REPORT="${REPORT}\\n:red_circle: **${NAME}** (:${PORT}): HTTP ${HTTP_CODE} (expected ${EXPECTED})"
+              FAILURES="${FAILURES}\\n- **${NAME}** (:${PORT}): HTTP ${HTTP_CODE}"
+            fi
+          done
+
+          if [ "$ALL_OK" = true ]; then
+            COLOR=3066993  # Green
+            TITLE="All Services Operational"
+          else
+            COLOR=15158332  # Red
+            TITLE="ALERT: Service(s) Down"
+          fi
+
+          # Build Discord embed payload
+          PAYLOAD=$(cat <<ENDJSON
+          {
+            "username": "Mac Mini Monitor",
+            "embeds": [{
+              "title": "${TITLE}",
+              "description": "$(echo -e "${REPORT}")",
+              "color": ${COLOR},
+              "footer": {"text": "Uptime check at ${TIMESTAMP}"},
+              "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+            }]
+          }
+          ENDJSON
+          )
+
+          # Always alert on failure, only post hourly when all OK
+          MINUTE=$(date -u +"%M")
+          if [ "$ALL_OK" = false ]; then
+            echo "Services down — sending alert"
+            curl -s -H "Content-Type: application/json" -d "$PAYLOAD" "$DISCORD_WEBHOOK"
+          elif [ "$MINUTE" = "00" ]; then
+            echo "Hourly all-clear — sending status"
+            curl -s -H "Content-Type: application/json" -d "$PAYLOAD" "$DISCORD_WEBHOOK"
+          else
+            echo "All OK, skipping notification (not top of hour)"
+          fi

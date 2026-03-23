@@ -2,7 +2,7 @@ name: Daily Server Report
 
 on:
   schedule:
-    - cron: '0 13 * * *' # 8 AM EST (13:00 UTC)
+    - cron: '0 13 * * *'
   workflow_dispatch:
 
 jobs:
@@ -26,91 +26,89 @@ jobs:
           script: |
             export PATH=/opt/orbstack/bin:/usr/local/bin:/opt/homebrew/bin:$PATH
 
-            echo "===OVERVIEW==="
-            echo "hostname=$(hostname)"
-            echo "date=$(date)"
-            echo "uptime=$(uptime)"
+            echo "HOSTNAME=$(hostname)"
+            echo "UPTIME=$(uptime | sed 's/.*up /up /' | cut -d',' -f1-2)"
 
-            echo "===DISK_DETAIL==="
-            df -h /System/Volumes/Data 2>/dev/null || df -h /
-            echo "---"
-            # Top 10 largest directories in home
-            du -sh ~/Documents ~/Downloads ~/Library ~/Pictures ~/Movies ~/*.git ~/coral_moneymanager ~/smithbuilder ~/projectmanager ~/openrouterlogviewer ~/project-coach 2>/dev/null | sort -rh | head -10
+            # Disk
+            DISK_LINE=$(df -h /System/Volumes/Data 2>/dev/null | tail -1)
+            echo "DISK_USED=$(echo "$DISK_LINE" | awk '{print $3}')"
+            echo "DISK_TOTAL=$(echo "$DISK_LINE" | awk '{print $2}')"
+            echo "DISK_PCT=$(echo "$DISK_LINE" | awk '{print $5}')"
+            echo "DISK_FREE=$(echo "$DISK_LINE" | awk '{print $4}')"
 
-            echo "===DOCKER_DETAIL==="
-            echo "--- system df ---"
+            # Docker overview
+            echo "DOCKER_RUNNING=$(docker ps -q 2>/dev/null | wc -l | xargs)"
+            echo "DOCKER_IMAGES=$(docker images -q 2>/dev/null | wc -l | xargs)"
+            echo "DOCKER_STOPPED=$(docker ps -a --filter 'status=exited' --format '{{.Names}}' 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
+            echo "DANGLING_IMAGES=$(docker images -f 'dangling=true' -q 2>/dev/null | wc -l | xargs)"
+
+            # Docker disk
+            echo "DOCKER_DISK_START"
             docker system df 2>/dev/null
-            echo "--- containers ---"
-            docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Size}}" 2>/dev/null
-            echo "--- images ---"
-            docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}" 2>/dev/null | head -15
-            echo "--- volumes ---"
-            docker system df -v 2>/dev/null | grep -A 100 "VOLUME NAME" | head -15
+            echo "DOCKER_DISK_END"
 
-            echo "===MEMORY_DETAIL==="
-            # macOS memory pressure
-            memory_pressure 2>/dev/null || vm_stat 2>/dev/null || free -h 2>/dev/null
+            # Top directories
+            echo "TOP_DIRS_START"
+            du -sh ~/coral_moneymanager ~/smithbuilder ~/projectmanager ~/openrouterlogviewer ~/project-coach ~/Documents ~/Library ~/Downloads 2>/dev/null | sort -rh | head -8
+            echo "TOP_DIRS_END"
 
-            echo "===ALL_SERVICES==="
-            echo "--- HTTP Health Checks ---"
-            for port_name in "3000:OpenRouter Log Viewer" "3001:Mission Control" "3002:Project Manager" "3003:Homebase" "3004:Project Coach" "3005:Coral Money Manager" "3010:SmithBuilder" "8000:MC Backend" "9001:Penpot"; do
-              port="${port_name%%:*}"
-              name="${port_name##*:}"
-              code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://localhost:$port" 2>/dev/null || echo "000")
-              echo "${name}|${port}|${code}"
+            # All services
+            echo "SERVICES_START"
+            for pn in "3000:LogViewer" "3001:MissionCtrl" "3002:ProjMgr" "3003:Homebase" "3004:Coach" "3005:Coral" "3010:SmithBuilder" "8000:MCBackend" "9001:Penpot"; do
+              p="${pn%%:*}"; n="${pn##*:}"
+              c=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://localhost:$p" 2>/dev/null || echo "000")
+              echo "${n}|${p}|${c}"
             done
+            echo "SERVICES_END"
 
-            echo "--- LaunchAgents ---"
-            launchctl list 2>/dev/null | grep -E "openclaw|ollama|openrouter|homebase" || echo "none"
-
-            echo "--- Ollama ---"
-            curl -s --max-time 5 http://127.0.0.1:11434/api/tags 2>/dev/null | python3 -c "
-            import sys, json
-            try:
-              d = json.load(sys.stdin)
-              for m in d.get('models', []):
-                print(f\"  {m['name']}: {m.get('size', 'unknown')} bytes\")
-            except: print('  Parse error')
-            " 2>/dev/null || echo "  Not responding"
-
-            echo "===CLEANUP_OPPORTUNITIES==="
-            echo "Docker reclaimable:"
-            docker system df 2>/dev/null | grep -E "reclaimable" || echo "  unknown"
-            echo "Dangling images:"
-            docker images -f "dangling=true" -q 2>/dev/null | wc -l | xargs echo " "
-            echo "Stopped containers:"
-            docker ps -a --filter "status=exited" -q 2>/dev/null | wc -l | xargs echo " "
+            # Ollama
+            OLLAMA_OK=$(curl -s --max-time 3 http://127.0.0.1:11434/api/tags 2>/dev/null | head -c 1)
+            if [ "$OLLAMA_OK" = "{" ]; then
+              MODELS=$(curl -s --max-time 3 http://127.0.0.1:11434/api/tags 2>/dev/null | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('models',[])))" 2>/dev/null || echo "?")
+              echo "OLLAMA=Running (${MODELS} models)"
+            else
+              echo "OLLAMA=Not responding"
+            fi
 
       - name: Send daily report to Discord
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_MONITORING }}
-          RAW_OUTPUT: ${{ steps.audit.outputs.stdout }}
+          RAW: ${{ steps.audit.outputs.stdout }}
+        shell: bash
         run: |
           export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
-          TIMESTAMP=$(date -u +"%Y-%m-%d")
+          TODAY="$(date -u +'%Y-%m-%d')"
+          NOW_ISO="$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')"
 
-          # Extract disk info
-          DISK_LINE=$(echo "$RAW_OUTPUT" | sed -n '/===DISK_DETAIL===/,/===DOCKER_DETAIL===/p' | grep -v '===' | head -2 | tail -1)
-          DISK_PCT=$(echo "$DISK_LINE" | awk '{print $5}' | tr -d '%' 2>/dev/null)
+          HOSTNAME="$(echo "$RAW" | grep '^HOSTNAME=' | cut -d= -f2-)"
+          UPTIME_INFO="$(echo "$RAW" | grep '^UPTIME=' | cut -d= -f2-)"
+          DISK_PCT="$(echo "$RAW" | grep '^DISK_PCT=' | cut -d= -f2- | tr -d '%')"
+          DISK_FREE="$(echo "$RAW" | grep '^DISK_FREE=' | cut -d= -f2-)"
+          DISK_USED="$(echo "$RAW" | grep '^DISK_USED=' | cut -d= -f2-)"
+          DISK_TOTAL="$(echo "$RAW" | grep '^DISK_TOTAL=' | cut -d= -f2-)"
+          DOCKER_RUNNING="$(echo "$RAW" | grep '^DOCKER_RUNNING=' | cut -d= -f2-)"
+          DOCKER_IMAGES="$(echo "$RAW" | grep '^DOCKER_IMAGES=' | cut -d= -f2-)"
+          DOCKER_STOPPED="$(echo "$RAW" | grep '^DOCKER_STOPPED=' | cut -d= -f2-)"
+          DANGLING="$(echo "$RAW" | grep '^DANGLING_IMAGES=' | cut -d= -f2-)"
+          OLLAMA="$(echo "$RAW" | grep '^OLLAMA=' | cut -d= -f2-)"
 
-          # Extract service health
-          SERVICE_STATUS=""
+          # Service status
+          SLIST=""
+          SVC_DOWN=0
           while IFS='|' read -r name port code; do
             [ -z "$name" ] && continue
             if [ "$code" = "200" ] || [ "$code" = "302" ] || [ "$code" = "307" ]; then
-              SERVICE_STATUS="${SERVICE_STATUS}:green_circle: ${name} (:${port})\\n"
+              SLIST="${SLIST}:green_circle: ${name} :${port}\\n"
             else
-              SERVICE_STATUS="${SERVICE_STATUS}:red_circle: ${name} (:${port}) — HTTP ${code}\\n"
+              SLIST="${SLIST}:red_circle: ${name} :${port} (${code})\\n"
+              SVC_DOWN=$((SVC_DOWN + 1))
             fi
-          done <<< "$(echo "$RAW_OUTPUT" | sed -n '/--- HTTP Health Checks ---/,/--- LaunchAgents ---/p' | grep '|')"
+          done <<< "$(echo "$RAW" | sed -n '/SERVICES_START/,/SERVICES_END/p' | grep '|')"
 
-          # Extract Docker summary
-          DOCKER_SUMMARY=$(echo "$RAW_OUTPUT" | sed -n '/--- system df ---/,/--- containers ---/p' | grep -v '---' | head -5)
+          # Top dirs
+          TOP_DIRS="$(echo "$RAW" | sed -n '/TOP_DIRS_START/,/TOP_DIRS_END/p' | grep -v '_START\|_END' | head -8 | tr '\n' ',' | sed 's/,$//')"
 
-          # Extract cleanup opportunities
-          CLEANUP=$(echo "$RAW_OUTPUT" | sed -n '/===CLEANUP_OPPORTUNITIES===/,//p' | grep -v '===' | head -6)
-
-          # Determine color
+          # Color
           COLOR=3066993
           if [ -n "$DISK_PCT" ] && [ "$DISK_PCT" -gt 90 ] 2>/dev/null; then
             COLOR=15158332
@@ -118,23 +116,11 @@ jobs:
             COLOR=15844367
           fi
 
-          PAYLOAD=$(cat <<ENDJSON
-          {
-            "username": "Mac Mini Monitor",
-            "embeds": [{
-              "title": ":clipboard: Daily Server Report — ${TIMESTAMP}",
-              "color": ${COLOR},
-              "fields": [
-                {"name": ":floppy_disk: Disk Usage", "value": "${DISK_LINE:-unknown}", "inline": false},
-                {"name": ":globe_with_meridians: Services", "value": "$(echo -e "${SERVICE_STATUS:-No services checked}")", "inline": false},
-                {"name": ":whale: Docker", "value": "$(echo "$DOCKER_SUMMARY" | tr '\n' ' ' | head -c 200)", "inline": false},
-                {"name": ":broom: Cleanup Opportunities", "value": "$(echo -e "$CLEANUP" | head -c 200)", "inline": false}
-              ],
-              "footer": {"text": "Daily report — run /docker-cleanup to reclaim space"},
-              "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-            }]
-          }
-          ENDJSON
-          )
+          DISK_STR="${DISK_USED}/${DISK_TOTAL} (${DISK_PCT}%) - ${DISK_FREE} free"
+          CLEANUP_STR="Dangling images: ${DANGLING}, Stopped containers: ${DOCKER_STOPPED:-none}"
+
+          PAYLOAD="{\"username\":\"Mac Mini Monitor\",\"embeds\":[{\"title\":\":clipboard: Daily Report - ${TODAY}\",\"color\":${COLOR},\"fields\":[{\"name\":\"Host\",\"value\":\"${HOSTNAME}\",\"inline\":true},{\"name\":\"Uptime\",\"value\":\"${UPTIME_INFO}\",\"inline\":true},{\"name\":\"Disk\",\"value\":\"${DISK_STR}\",\"inline\":false},{\"name\":\"Docker\",\"value\":\"${DOCKER_RUNNING} running, ${DOCKER_IMAGES} images\",\"inline\":true},{\"name\":\"Ollama\",\"value\":\"${OLLAMA}\",\"inline\":true},{\"name\":\"Services\",\"value\":\"$(echo -e "$SLIST" | head -c 500)\",\"inline\":false},{\"name\":\"Cleanup\",\"value\":\"${CLEANUP_STR}\",\"inline\":false}],\"timestamp\":\"${NOW_ISO}\"}]}"
 
           curl -s -H "Content-Type: application/json" -d "$PAYLOAD" "$DISCORD_WEBHOOK"
+          echo ""
+          echo "Daily report sent."

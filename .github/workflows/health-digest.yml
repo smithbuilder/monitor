@@ -2,7 +2,7 @@ name: Server Health Digest
 
 on:
   schedule:
-    - cron: '0 */6 * * *' # Every 6 hours
+    - cron: '0 */6 * * *'
   workflow_dispatch:
 
 jobs:
@@ -26,128 +26,104 @@ jobs:
           script: |
             export PATH=/opt/orbstack/bin:/usr/local/bin:/opt/homebrew/bin:$PATH
 
-            echo "===HOSTNAME==="
-            hostname
+            echo "HOSTNAME=$(hostname)"
+            echo "UPTIME=$(uptime | sed 's/.*up /up /' | cut -d',' -f1-2)"
 
-            echo "===UPTIME==="
-            uptime
+            # Disk
+            DISK_LINE=$(df -h /System/Volumes/Data 2>/dev/null | tail -1)
+            echo "DISK_USED=$(echo "$DISK_LINE" | awk '{print $3}')"
+            echo "DISK_TOTAL=$(echo "$DISK_LINE" | awk '{print $2}')"
+            echo "DISK_PCT=$(echo "$DISK_LINE" | awk '{print $5}')"
+            echo "DISK_FREE=$(echo "$DISK_LINE" | awk '{print $4}')"
 
-            echo "===DISK==="
-            df -h /System/Volumes/Data 2>/dev/null || df -h /
+            # Docker
+            echo "DOCKER_RUNNING=$(docker ps -q 2>/dev/null | wc -l | xargs)"
+            echo "DOCKER_TOTAL=$(docker ps -aq 2>/dev/null | wc -l | xargs)"
+            echo "DOCKER_STOPPED=$(docker ps -a --filter 'status=exited' --format '{{.Names}}' 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
 
-            echo "===MEMORY==="
-            # macOS uses vm_stat instead of free
-            vm_stat 2>/dev/null | head -10 || free -m 2>/dev/null | grep Mem
+            # Container list
+            echo "CONTAINERS_START"
+            docker ps --format "{{.Names}}|{{.Status}}" 2>/dev/null
+            echo "CONTAINERS_END"
 
-            echo "===DOCKER_SYSTEM==="
-            docker system df 2>/dev/null || echo "Docker not available"
+            # Ollama
+            OLLAMA_OK=$(curl -s --max-time 3 http://127.0.0.1:11434/api/tags 2>/dev/null | head -c 1)
+            if [ "$OLLAMA_OK" = "{" ]; then
+              echo "OLLAMA=Running"
+            else
+              echo "OLLAMA=Not responding"
+            fi
 
-            echo "===DOCKER_PS==="
-            docker ps --format "{{.Names}}|{{.Status}}|{{.Ports}}" 2>/dev/null || echo "Docker not available"
-
-            echo "===DOCKER_STOPPED==="
-            docker ps -a --filter "status=exited" --format "{{.Names}}|{{.Status}}" 2>/dev/null || echo "none"
-
-            echo "===SERVICES==="
-            # Check bare Node.js apps
-            for port_name in "3000:LogViewer" "3003:Homebase" "3004:Coach"; do
-              port="${port_name%%:*}"
-              name="${port_name##*:}"
-              code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://localhost:$port" 2>/dev/null || echo "000")
-              echo "${name}|${port}|${code}"
+            # Service checks
+            echo "SERVICES_START"
+            for pn in "3000:LogViewer" "3001:MissionCtrl" "3002:ProjMgr" "3003:Homebase" "3004:Coach" "3005:Coral" "3010:SmithBuilder" "8000:MCBackend" "9001:Penpot"; do
+              p="${pn%%:*}"; n="${pn##*:}"
+              c=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://localhost:$p" 2>/dev/null || echo "000")
+              echo "${n}|${p}|${c}"
             done
+            echo "SERVICES_END"
 
-            echo "===OLLAMA==="
-            curl -s --max-time 5 http://127.0.0.1:11434/api/tags 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'{len(d.get(\"models\",[]))} models loaded')" 2>/dev/null || echo "Ollama not responding"
-
-            echo "===LAUNCHD==="
-            launchctl list 2>/dev/null | grep -E "openclaw|ollama|openrouter|homebase" || echo "No launchd services found"
-
-            echo "===DOCKER_LOGS_SIZE==="
-            # Check if any container logs are large
-            for container in $(docker ps --format "{{.Names}}" 2>/dev/null); do
-              log_file=$(docker inspect --format='{{.LogPath}}' "$container" 2>/dev/null)
-              if [ -n "$log_file" ] && [ -f "$log_file" ]; then
-                size=$(du -sh "$log_file" 2>/dev/null | awk '{print $1}')
-                echo "${container}|${size}"
-              fi
-            done
-
-      - name: Parse metrics and send Discord digest
+      - name: Send digest to Discord
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_MONITORING }}
-          RAW_OUTPUT: ${{ steps.metrics.outputs.stdout }}
+          RAW: ${{ steps.metrics.outputs.stdout }}
+        shell: bash
         run: |
           export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
-          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
+          NOW_ISO="$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')"
 
-          # Extract sections
-          HOSTNAME=$(echo "$RAW_OUTPUT" | sed -n '/===HOSTNAME===/,/===UPTIME===/p' | grep -v '===' | head -1)
-          UPTIME_INFO=$(echo "$RAW_OUTPUT" | sed -n '/===UPTIME===/,/===DISK===/p' | grep -v '===' | head -1)
-          DISK_INFO=$(echo "$RAW_OUTPUT" | sed -n '/===DISK===/,/===MEMORY===/p' | grep -v '===' | tail -1)
-          DOCKER_SYS=$(echo "$RAW_OUTPUT" | sed -n '/===DOCKER_SYSTEM===/,/===DOCKER_PS===/p' | grep -v '===' | head -5)
-          DOCKER_PS=$(echo "$RAW_OUTPUT" | sed -n '/===DOCKER_PS===/,/===DOCKER_STOPPED===/p' | grep -v '===')
-          STOPPED=$(echo "$RAW_OUTPUT" | sed -n '/===DOCKER_STOPPED===/,/===SERVICES===/p' | grep -v '===' | grep -v '^none$')
-          OLLAMA=$(echo "$RAW_OUTPUT" | sed -n '/===OLLAMA===/,/===LAUNCHD===/p' | grep -v '===' | head -1)
-          LOG_SIZES=$(echo "$RAW_OUTPUT" | sed -n '/===DOCKER_LOGS_SIZE===/,//p' | grep -v '===')
+          # Parse values
+          HOSTNAME="$(echo "$RAW" | grep '^HOSTNAME=' | cut -d= -f2-)"
+          UPTIME_INFO="$(echo "$RAW" | grep '^UPTIME=' | cut -d= -f2-)"
+          DISK_PCT="$(echo "$RAW" | grep '^DISK_PCT=' | cut -d= -f2- | tr -d '%')"
+          DISK_FREE="$(echo "$RAW" | grep '^DISK_FREE=' | cut -d= -f2-)"
+          DISK_USED="$(echo "$RAW" | grep '^DISK_USED=' | cut -d= -f2-)"
+          DISK_TOTAL="$(echo "$RAW" | grep '^DISK_TOTAL=' | cut -d= -f2-)"
+          DOCKER_RUNNING="$(echo "$RAW" | grep '^DOCKER_RUNNING=' | cut -d= -f2-)"
+          DOCKER_TOTAL="$(echo "$RAW" | grep '^DOCKER_TOTAL=' | cut -d= -f2-)"
+          DOCKER_STOPPED="$(echo "$RAW" | grep '^DOCKER_STOPPED=' | cut -d= -f2-)"
+          OLLAMA="$(echo "$RAW" | grep '^OLLAMA=' | cut -d= -f2-)"
 
-          # Determine overall health color
-          COLOR=3066993  # Green (default)
-          TITLE="Server Health: OK"
-
-          # Check disk usage percentage
-          DISK_PCT=$(echo "$DISK_INFO" | awk '{print $5}' | tr -d '%' 2>/dev/null)
-          if [ -n "$DISK_PCT" ] && [ "$DISK_PCT" -gt 90 ] 2>/dev/null; then
-            COLOR=15158332  # Red
-            TITLE="Server Health: CRITICAL"
-          elif [ -n "$DISK_PCT" ] && [ "$DISK_PCT" -gt 80 ] 2>/dev/null; then
-            COLOR=15844367  # Yellow
-            TITLE="Server Health: WARNING"
-          fi
-
-          # Check for stopped containers
-          if [ -n "$STOPPED" ]; then
-            COLOR=15844367  # Yellow (at minimum)
-            TITLE="Server Health: WARNING"
-          fi
-
-          # Format Docker container list
-          CONTAINER_LIST=""
-          while IFS='|' read -r name status ports; do
+          # Build container list
+          CLIST=""
+          while IFS='|' read -r name status; do
             [ -z "$name" ] && continue
             if echo "$status" | grep -qi "up"; then
-              CONTAINER_LIST="${CONTAINER_LIST}:green_circle: ${name}: ${status}\\n"
+              CLIST="${CLIST}:green_circle: ${name}\\n"
             else
-              CONTAINER_LIST="${CONTAINER_LIST}:red_circle: ${name}: ${status}\\n"
+              CLIST="${CLIST}:red_circle: ${name}\\n"
             fi
-          done <<< "$DOCKER_PS"
+          done <<< "$(echo "$RAW" | sed -n '/CONTAINERS_START/,/CONTAINERS_END/p' | grep '|')"
 
-          # Format log sizes (warn if any > 100M)
-          LOG_WARNINGS=""
-          while IFS='|' read -r container size; do
-            [ -z "$container" ] && continue
-            LOG_WARNINGS="${LOG_WARNINGS}${container}: ${size}\\n"
-          done <<< "$LOG_SIZES"
+          # Build service list
+          SLIST=""
+          SVC_DOWN=0
+          while IFS='|' read -r name port code; do
+            [ -z "$name" ] && continue
+            if [ "$code" = "200" ] || [ "$code" = "302" ] || [ "$code" = "307" ]; then
+              SLIST="${SLIST}:green_circle: ${name} :${port}\\n"
+            else
+              SLIST="${SLIST}:red_circle: ${name} :${port} (${code})\\n"
+              SVC_DOWN=$((SVC_DOWN + 1))
+            fi
+          done <<< "$(echo "$RAW" | sed -n '/SERVICES_START/,/SERVICES_END/p' | grep '|')"
 
-          PAYLOAD=$(cat <<ENDJSON
-          {
-            "username": "Mac Mini Monitor",
-            "embeds": [{
-              "title": "${TITLE}",
-              "color": ${COLOR},
-              "fields": [
-                {"name": ":computer: Host", "value": "${HOSTNAME:-unknown}", "inline": true},
-                {"name": ":clock1: Uptime", "value": "$(echo "$UPTIME_INFO" | sed 's/.*up/up/' | cut -d',' -f1-2)", "inline": true},
-                {"name": ":floppy_disk: Disk", "value": "${DISK_INFO:-unknown}", "inline": false},
-                {"name": ":whale: Containers", "value": "$(echo -e "${CONTAINER_LIST:-No containers}")", "inline": false},
-                {"name": ":llama: Ollama", "value": "${OLLAMA:-unknown}", "inline": true},
-                {"name": ":page_facing_up: Log Sizes", "value": "$(echo -e "${LOG_WARNINGS:-No large logs}")", "inline": false}
-              ],
-              "footer": {"text": "Health digest at ${TIMESTAMP}"},
-              "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-            }]
-          }
-          ENDJSON
-          )
+          # Color
+          COLOR=3066993
+          TITLE="Server Health: OK"
+          if [ -n "$DISK_PCT" ] && [ "$DISK_PCT" -gt 90 ] 2>/dev/null; then
+            COLOR=15158332; TITLE="Server Health: CRITICAL"
+          elif [ -n "$DISK_PCT" ] && [ "$DISK_PCT" -gt 80 ] 2>/dev/null; then
+            COLOR=15844367; TITLE="Server Health: WARNING"
+          fi
+          if [ "$SVC_DOWN" -gt 0 ] && [ "$COLOR" = "3066993" ]; then
+            COLOR=15844367; TITLE="Server Health: WARNING"
+          fi
+
+          DISK_STR="${DISK_USED}/${DISK_TOTAL} (${DISK_PCT}%) - ${DISK_FREE} free"
+
+          PAYLOAD="{\"username\":\"Mac Mini Monitor\",\"embeds\":[{\"title\":\"${TITLE}\",\"color\":${COLOR},\"fields\":[{\"name\":\"Host\",\"value\":\"${HOSTNAME}\",\"inline\":true},{\"name\":\"Uptime\",\"value\":\"${UPTIME_INFO}\",\"inline\":true},{\"name\":\"Disk\",\"value\":\"${DISK_STR}\",\"inline\":false},{\"name\":\"Docker\",\"value\":\"${DOCKER_RUNNING}/${DOCKER_TOTAL} running\",\"inline\":true},{\"name\":\"Ollama\",\"value\":\"${OLLAMA}\",\"inline\":true},{\"name\":\"Containers\",\"value\":\"$(echo -e "$CLIST" | head -c 500)\",\"inline\":false},{\"name\":\"Services\",\"value\":\"$(echo -e "$SLIST" | head -c 500)\",\"inline\":false}],\"timestamp\":\"${NOW_ISO}\"}]}"
 
           curl -s -H "Content-Type: application/json" -d "$PAYLOAD" "$DISCORD_WEBHOOK"
+          echo ""
+          echo "Digest sent."

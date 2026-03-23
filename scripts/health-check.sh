@@ -5,7 +5,7 @@
 #
 # Or run manually: DISCORD_WEBHOOK_MONITORING="..." bash health-check.sh
 
-set -euo pipefail
+set -eo pipefail
 export PATH=/opt/orbstack/bin:/usr/local/bin:/opt/homebrew/bin:$PATH
 
 WEBHOOK_URL="${DISCORD_WEBHOOK_MONITORING:-}"
@@ -34,11 +34,11 @@ fi
 PAGE_SIZE=$(sysctl -n hw.pagesize 2>/dev/null || echo 4096)
 VM_STAT=$(vm_stat 2>/dev/null)
 if [ -n "$VM_STAT" ]; then
-  PAGES_FREE=$(echo "$VM_STAT" | grep "Pages free" | awk '{print $3}' | tr -d '.')
-  PAGES_INACTIVE=$(echo "$VM_STAT" | grep "Pages inactive" | awk '{print $3}' | tr -d '.')
-  PAGES_ACTIVE=$(echo "$VM_STAT" | grep "Pages active" | awk '{print $3}' | tr -d '.')
-  PAGES_WIRED=$(echo "$VM_STAT" | grep "Pages wired" | awk '{print $3}' | tr -d '.')
-  PAGES_COMPRESSED=$(echo "$VM_STAT" | grep "Pages occupied by compressor" | awk '{print $5}' | tr -d '.')
+  PAGES_FREE=$(echo "$VM_STAT" | awk '/Pages free:/ {print $3}' | tr -d '.')
+  PAGES_INACTIVE=$(echo "$VM_STAT" | awk '/Pages inactive:/ {print $3}' | tr -d '.')
+  PAGES_ACTIVE=$(echo "$VM_STAT" | awk '/Pages active:/ {print $3}' | tr -d '.')
+  PAGES_WIRED=$(echo "$VM_STAT" | awk '/Pages wired down:/ {print $4}' | tr -d '.')
+  PAGES_COMPRESSED=$(echo "$VM_STAT" | awk '/Pages occupied by compressor:/ {print $5}' | tr -d '.')
 
   TOTAL_PAGES=$((PAGES_FREE + PAGES_INACTIVE + PAGES_ACTIVE + PAGES_WIRED + PAGES_COMPRESSED))
   USED_PAGES=$((PAGES_ACTIVE + PAGES_WIRED + PAGES_COMPRESSED))

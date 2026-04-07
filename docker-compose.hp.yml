@@ -1,0 +1,27 @@
+# Docker Compose for HP Laptop (Windows Docker Desktop)
+# Adapted from docker-compose.yml for Windows environment
+#
+# Differences from Mac Mini version:
+# - Docker socket via Windows named pipe instead of Unix socket
+# - No network_mode: host (unsupported on Docker Desktop for Windows)
+# - Explicit port mapping not needed (bot is outbound-only, no listening ports)
+#
+# Setup:
+# 1. Copy .env.example to .env and fill in values
+# 2. Register commands: docker compose -f docker-compose.hp.yml run --rm bot node register-commands.js
+# 3. Start: docker compose -f docker-compose.hp.yml up -d
+
+services:
+  bot:
+    build: ./bot
+    container_name: monitor-bot
+    restart: unless-stopped
+    env_file: .env
+    # Mount Docker socket via Windows named pipe
+    volumes:
+      - //./pipe/docker_engine:/var/run/docker.sock:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,19 @@
+title = "monitor secret scanning"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Files and paths that legitimately contain secret-shaped strings (examples, templates, test fixtures)"
+paths = [
+    '''\\.env\\.example''',
+    '''docs/.*example''',
+    '''README\\.md''',
+]
+regexTarget = "match"
+regexes = [
+    '''(?i)your[-_]?api[-_]?key''',
+    '''(?i)placeholder''',
+    '''(?i)<your.*>''',
+    '''\\$\\{[A-Z_]+\\}''',
+]

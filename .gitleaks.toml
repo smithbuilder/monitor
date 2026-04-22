@@ -16,4 +16,8 @@ regexes = [
     '''(?i)placeholder''',
     '''(?i)<your.*>''',
     '''\\$\\{[A-Z_]+\\}''',
+    '''pbk_\\.\\.\\.''',
+    '''(?i)(gateway|your|api|auth|bearer)[_-]?token''',
+    '''pbk_(invalid|placeholder|example|test|demo|foo|bar|baz)''',
+    '''sk_[a-z]+_\\.\\.\\.''',
 ]

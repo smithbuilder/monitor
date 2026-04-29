@@ -20,6 +20,7 @@ jobs:
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_MONITORING }}
           MAC_MINI_IP: ${{ secrets.MAC_MINI_HOST }}
+          DELL_IP: ${{ secrets.DELL_HOST }}
         shell: bash
         run: |
           export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
@@ -29,8 +30,8 @@ jobs:
           NOW_ISO="$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')"
 
           check_service() {
-            local NAME="$1" PORT="$2" URLPATH="$3" EXPECTED="$4"
-            local URL="http://${MAC_MINI_IP}:${PORT}${URLPATH}"
+            local NAME="$1" PORT="$2" URLPATH="$3" EXPECTED="$4" HOST="${5:-$MAC_MINI_IP}"
+            local URL="http://${HOST}:${PORT}${URLPATH}"
             local HTTP_CODE
             HTTP_CODE=$(curl -o /dev/null -s -w "%{http_code}" --max-time 10 "$URL" 2>/dev/null || echo "000")
 
@@ -48,15 +49,14 @@ jobs:
             fi
           }
 
+          # Mac Mini services
           check_service "OpenRouter Log Viewer" 3000 "/" "200,307"
-          check_service "Mission Control" 3001 "/" "200"
-          check_service "Project Manager" 3002 "/api/health" "200"
           check_service "Homebase" 3003 "/api/health" "200"
           check_service "Project Coach" 3004 "/" "200"
-          check_service "Coral Money Manager" 3005 "/api/health" "200"
           check_service "SmithBuilder" 3010 "/" "200"
-          check_service "MC Backend" 8000 "/docs" "200"
-          check_service "Penpot" 9001 "/" "200,302"
+
+          # Dell services
+          check_service "Coral Money Manager" 3005 "/api/health" "200" "$DELL_IP"
 
           if [ "$ALL_OK" = true ]; then
             COLOR=3066993

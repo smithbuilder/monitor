@@ -95,14 +95,10 @@ for port_name in "3000:OpenRouter Log Viewer" "3003:Homebase" "3004:Project Coac
 done
 
 # --- Docker App Health Checks ---
-for port_name in "3002:Project Manager" "3005:Coral Money Manager" "3010:SmithBuilder"; do
+for port_name in "3010:SmithBuilder"; do
   port="${port_name%%:*}"
   name="${port_name##*:}"
-  if [ "$port" = "3002" ] || [ "$port" = "3005" ]; then
-    url="http://localhost:${port}/api/health"
-  else
-    url="http://localhost:${port}/"
-  fi
+  url="http://localhost:${port}/"
   code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$url" 2>/dev/null || echo "000")
   if [ "$code" = "000" ]; then
     add_alert "**${name}** (port ${port}) is **not responding**"
